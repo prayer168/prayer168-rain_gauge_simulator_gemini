@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>雨量筒科學探究模擬器</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        body {
+            font-family: 'Segoe UI', "Microsoft JhengHei", Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f0f4f8;
+            color: #2d3748;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        .header {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        .controls {
+            background: white;
+            padding: 15px 30px;
+            border-radius: 15px;
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
+            display: flex;
+            gap: 20px;
+            align-items: center;
+            margin-bottom: 25px;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+        button {
+            padding: 12px 24px;
+            font-size: 16px;
+            font-weight: 600;
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+            transition: all 0.2s;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        #toggleBtn {
+            background-color: #4299e1;
+            color: white;
+        }
+        #toggleBtn:hover { background-color: #3182ce; transform: translateY(-1px); }
+        #toggleBtn.paused { background-color: #ed8936; }
+        
+        #resetBtn {
+            background-color: #f56565;
+            color: white;
+        }
+        #resetBtn:hover { background-color: #e53e3e; transform: translateY(-1px); }
+        
+        .slider-group {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            font-weight: bold;
+        }
+        input[type=range] {
+            cursor: pointer;
+        }
+        canvas {
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+            margin-bottom: 25px;
+        }
+        #chart {
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+            padding: 25px;
+            width: 100%;
+            max-width: 900px;
+        }
+        .axis-label { font-size: 12px; fill: #718096; }
+        .line { fill: none; stroke-width: 3px; stroke-linecap: round; }
+        .grid line { stroke: #edf2f7; }
+        .legend text { font-size: 14px; fill: #4a5568; font-weight: 500; }
+    </style>
+</head>
+<body>
+
+    <div class="header">
+        <h1>☔ 雨量筒形狀與水位變化模擬</h1>
+        <p>探究「開口面積」與「容器形狀」如何影響降雨觀測值</p>
+    </div>
+
+    <div class="controls">
+        <button id="toggleBtn">開始降雨</button>
+        <button id="resetBtn">重設實驗</button>
+        <div class="slider-group">
+            <label for="rainRate">雨勢強度：</label>
+            <input type="range" id="rainRate" min="0.1" max="2" step="0.1" value="0.6">
+        </div>
+    </div>
+
+    <canvas id="simCanvas" width="940" height="380"></canvas>
+
+    <div id="chart"></div>
+
+    <script>
+        // --- 1. 初始化容器規格 ---
+        // topW: 開口寬度, botW: 底部寬度, offset: 畫布位置
+        const containers = [
+            { id: 'A', name: '寬圓柱', topW: 60, botW: 60, color: '#3182ce', offset: 120 },
+            { id: 'B', name: '窄口瓶', topW: 20, botW: 65, color: '#e53e3e', offset: 260 },
+            { id: 'C', name: '窄圓柱', topW: 32, botW: 32, color: '#38a169', offset: 400 },
+            { id: 'D', name: '廣口杯', topW: 70, botW: 35, color: '#d69e2e', offset: 540 },
+            { id: 'E', name: '漏斗筒', topW: 95, botW: 18, color: '#805ad5', offset: 680 },
+            { id: 'F', name: '錐形瓶', topW: 18, botW: 75, color: '#d53f8c', offset: 820 }
+        ];
+
+        const maxHeight = 220; 
+        const baseY = 300;     
+        let isRunning = false;
+        let rainIntensity = 0.6;
+        let timeTick = 0;
+        let waterLevels = containers.map(() => 0); 
+        let dataLog = []; 
+
+        // --- 2. Canvas 繪圖功能 ---
+        const canvas = document.getElementById('simCanvas');
+        const ctx = canvas.getContext('2d');
+
+        function drawScene() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            // 繪製格線與刻度
+            ctx.strokeStyle = '#e2e8f0';
+            ctx.lineWidth = 1;
+            ctx.font = '12px Arial';
+            ctx.fillStyle = '#a0aec0';
+            
+            // 將刻度文字改為靠右對齊，避免被切斷
+            ctx.textAlign = 'right'; 
+
+            for(let h = 0; h <= maxHeight; h += 50) {
+                const y = baseY - h;
+                ctx.beginPath();
+                // 線條起點稍微往右移到 65，留空間給文字
+                ctx.moveTo(65, y); 
+                ctx.lineTo(920, y);
+                ctx.stroke();
+                // 數字靠右對齊在 x=60 的位置
+                ctx.fillText(h + ' mm', 60, y + 4); 
+            }
+
+            containers.forEach((c, i) => {
+                const x = c.offset;
+                const level = waterLevels[i];
+                
+                // 計算當前水面的寬度 (根據梯形比例)
+                const currentSurfaceW = c.botW + (c.topW - c.botW) * (level / maxHeight);
+
+                // 畫水
+                if (level > 0) {
+                    ctx.fillStyle = c.color + '77'; // 半透明
+                    ctx.beginPath();
+                    ctx.moveTo(x - c.botW/2, baseY);
+                    ctx.lineTo(x + c.botW/2, baseY);
+                    ctx.lineTo(x + currentSurfaceW/2, baseY - level);
+                    ctx.lineTo(x - currentSurfaceW/2, baseY - level);
+                    ctx.closePath();
+                    ctx.fill();
+                }
+
+                // 畫容器外框
+                ctx.strokeStyle = '#2d3748';
+                ctx.lineWidth = 2.5;
+                ctx.lineJoin = 'round';
+                ctx.beginPath();
+                ctx.moveTo(x - c.topW/2, baseY - maxHeight);
+                ctx.lineTo(x - c.botW/2, baseY);
+                ctx.lineTo(x + c.botW/2, baseY);
+                ctx.lineTo(x + c.topW/2, baseY - maxHeight);
+                ctx.stroke();
+
+                // 標註
+                // 這裡務必將文字對齊方式改回置中，否則容器下方的標籤也會歪掉
+                ctx.textAlign = 'center'; 
+                ctx.fillStyle = '#2d3748';
+                ctx.font = 'bold 16px sans-serif';
+                ctx.fillText(c.id, x, baseY + 30);
+                
+                ctx.font = '13px sans-serif';
+                ctx.fillStyle = '#718096';
+                ctx.fillText(c.name, x, baseY + 50);
+                
+                // 即時高度文字
+                ctx.fillStyle = c.color;
+                ctx.font = 'bold 14px sans-serif';
+                ctx.fillText(level.toFixed(1) + ' mm', x, baseY - maxHeight - 15);
+            });
+        }
+
+        // --- 3. D3.js 即時圖表 ---
+        const margin = {top: 20, right: 130, bottom: 50, left: 60};
+        const chartW = 900 - margin.left - margin.right;
+        const chartH = 320 - margin.top - margin.bottom;
+
+        const svg = d3.select("#chart").append("svg")
+            .attr("width", chartW + margin.left + margin.right)
+            .attr("height", chartH + margin.top + margin.bottom)
+            .append("g")
+            .attr("transform", `translate(${margin.left},${margin.top})`);
+
+        const xScale = d3.scaleLinear().domain([0, 100]).range([0, chartW]);
+        const yScale = d3.scaleLinear().domain([0, maxHeight]).range([chartH, 0]);
+
+        const xAxis = svg.append("g").attr("transform", `translate(0,${chartH})`).call(d3.axisBottom(xScale));
+        const yAxis = svg.append("g").call(d3.axisLeft(yScale));
+
+        svg.append("text").attr("class", "axis-label").attr("x", chartW/2).attr("y", chartH + 40).style("text-anchor", "middle").text("觀測時間 (ticks)");
+        svg.append("text").attr("class", "axis-label").attr("transform", "rotate(-90)").attr("x", -chartH/2).attr("y", -45).style("text-anchor", "middle").text("讀取水位 (mm)");
+
+        const lineLines = containers.map(c => svg.append("path").attr("class", "line").attr("stroke", c.color));
+
+        // 圖例
+        const legend = svg.selectAll(".legend").data(containers).enter().append("g")
+            .attr("transform", (d, i) => `translate(${chartW + 15}, ${i * 22})`);
+        legend.append("rect").attr("width", 12).attr("height", 12).attr("rx", 3).style("fill", d => d.color);
+        legend.append("text").attr("x", 20).attr("y", 10).text(d => `${d.id} ${d.name}`);
+
+        // --- 4. 模擬邏輯與循環 ---
+        function updateSimulation() {
+            if (!isRunning) return;
+
+            timeTick += 0.25;
+            let currentRecord = { time: timeTick };
+
+            containers.forEach((c, i) => {
+                if (waterLevels[i] < maxHeight) {
+                    // 核心物理公式：
+                    // 進水量量(dv) = 開口寬度 * 雨勢
+                    // 水位上升(dh) = dv / 當前截面寬度
+                    const currentW = c.botW + (c.topW - c.botW) * (waterLevels[i] / maxHeight);
+                    const deltaH = (c.topW * rainIntensity * 0.1) / (currentW || 1);
+                    waterLevels[i] += deltaH;
+                }
+                if (waterLevels[i] > maxHeight) waterLevels[i] = maxHeight;
+                currentRecord[c.id] = waterLevels[i];
+            });
+
+            dataLog.push(currentRecord);
+
+            // X 軸自動滾動
+            if (timeTick > xScale.domain()[1]) {
+                xScale.domain([0, timeTick + 40]);
+                xAxis.call(d3.axisBottom(xScale));
+            }
+        }
+
+        function renderAll() {
+            drawScene();
+            // 更新圖表
+            const lineGen = d3.line().x(d => xScale(d.time)).y(d => yScale(d.val));
+            containers.forEach((c, i) => {
+                const points = dataLog.map(d => ({time: d.time, val: d[c.id]}));
+                lineLines[i].datum(points).attr("d", lineGen);
+            });
+            requestAnimationFrame(renderAll);
+        }
+
+        setInterval(updateSimulation, 30); // 物理更新頻率
+        renderAll(); // 渲染頻率
+
+        // --- 5. UI 互動監聽 ---
+        const toggleBtn = document.getElementById('toggleBtn');
+        toggleBtn.addEventListener('click', () => {
+            isRunning = !isRunning;
+            if (isRunning) {
+                toggleBtn.textContent = '暫停';
+                toggleBtn.classList.add('paused');
+            } else {
+                toggleBtn.textContent = '繼續降雨';
+                toggleBtn.classList.remove('paused');
+            }
+        });
+
+        document.getElementById('resetBtn').addEventListener('click', () => {
+            isRunning = false;
+            timeTick = 0;
+            waterLevels = containers.map(() => 0);
+            dataLog = [];
+            xScale.domain([0, 100]);
+            xAxis.call(d3.axisBottom(xScale));
+            toggleBtn.textContent = '開始降雨';
+            toggleBtn.classList.remove('paused');
+            
+            // 確保重置時畫面能立即更新
+            renderAll();
+        });
+
+        document.getElementById('rainRate').addEventListener('input', (e) => {
+            rainIntensity = parseFloat(e.target.value);
+        });
+
+    </script>
+</body>
+</html>
